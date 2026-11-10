@@ -1,32 +1,116 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema for Tulkit multi-user SaaS
+// Uses Supabase Postgres for storage + Supabase Auth for users.
+// The `userId` fields store the Supabase auth.users.id (UUID string).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+// Each user has one business profile (1:1 with Supabase auth user)
+model BusinessProfile {
+  id                String   @id @default(cuid())
+  userId            String   @unique // Supabase auth user ID
+
+  name              String   @default("Your Business Name")
+  email             String?
+  phone             String?
+  address           String?
+  vatNumber         String?
+  bankName          String?
+  bankAccount       String?
+  bankBranch        String?
+  swift             String?
+  logoDataUrl       String?
+  accentColor       String   @default("#0E7C9C")
+  currency          String   @default("ZAR")
+  currencySymbol    String   @default("R")
+  invoicePrefix     String   @default("INV")
+  quotePrefix       String   @default("QUO")
+  nextInvoiceNumber Int      @default(1)
+  nextQuoteNumber   Int      @default(1)
+  defaultTaxRate    Float    @default(15)
+  defaultPaymentTerms String @default("Payment due within 7 days of issue date.")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@map("business_profiles")
 }
 
-model Post {
+model Client {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  userId    String // Supabase auth user ID — owner of this client
+
+  name      String
+  email     String?
+  phone     String?
+  company   String?
+  address   String?
+  vatNumber String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  documents InvoiceDocument[]
+
+  @@index([userId])
+  @@map("clients")
+}
+
+model InvoiceDocument {
+  id          String   @id @default(cuid())
+  userId      String // Supabase auth user ID — owner of this document
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  type        String   // "invoice" | "quote"
+  number      String
+  status      String   // "draft" | "sent" | "viewed" | "paid" | "overdue"
+
+  // Snapshot of client at doc creation (so historical docs stay accurate)
+  clientName      String
+  clientEmail     String?
+  clientPhone     String?
+  clientCompany   String?
+  clientAddress   String?
+  clientVatNumber String?
+
+  issueDate  String
+  dueDate    String
+  taxRate    Float
+  globalDiscountPercent Float @default(0)
+  notes      String?
+  paymentTerms String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sentAt    DateTime?
+  paidAt    DateTime?
+
+  items     LineItem[]
+
+  @@index([userId])
+  @@map("invoice_documents")
+}
+
+model LineItem {
+  id              String  @id @default(cuid())
+  documentId      String
+  document        InvoiceDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  description     String
+  quantity        Float
+  unitPrice       Float
+  discountPercent Float   @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([documentId])
+  @@map("line_items")
 }
