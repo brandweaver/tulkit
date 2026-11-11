@@ -150,6 +150,7 @@ export function DocumentEditor({ docId, onBack }: Props) {
   async function handleDuplicate() {
     const newDoc = await createDocument(doc!.type, doc!.clientId);
     if (newDoc) {
+      // Use explicit save (not updateDocument) to ensure immediate sync
       await updateDoc(newDoc.id, {
         items: doc!.items,
         taxRate: doc!.taxRate,
@@ -157,8 +158,12 @@ export function DocumentEditor({ docId, onBack }: Props) {
         notes: doc!.notes,
         paymentTerms: doc!.paymentTerms,
       });
+      // Force immediate save
+      await saveDoc(newDoc.id);
       toast({ title: `Duplicated as ${newDoc.number}` });
       onBack();
+    } else {
+      toast({ title: "Could not duplicate", variant: "destructive" });
     }
   }
 
@@ -223,11 +228,15 @@ export function DocumentEditor({ docId, onBack }: Props) {
           <Button
             variant="ghost"
             className="text-destructive"
-            onClick={() => {
+            onClick={async () => {
               if (confirm(`Delete ${doc.number}?`)) {
-                deleteDoc(doc.id);
-                toast({ title: "Document deleted" });
-                onBack();
+                const success = await deleteDoc(doc.id);
+                if (success) {
+                  toast({ title: "Document deleted" });
+                  onBack();
+                } else {
+                  toast({ title: "Could not delete document", description: "Please try again.", variant: "destructive" });
+                }
               }
             }}
           >

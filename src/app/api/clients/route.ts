@@ -5,9 +5,14 @@ import { serializeClient } from "@/lib/serialize";
 import { can } from "@/lib/features";
 import { FREE_TIER_LIMITS } from "@/lib/types";
 
+function unauthorized() {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
 // GET /api/clients — list all clients for current user
 export async function GET() {
   const user = await requireAuth();
+  if (!user) return unauthorized();
   const clients = await db.client.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
@@ -18,6 +23,7 @@ export async function GET() {
 // POST /api/clients — create a new client
 export async function POST(request: Request) {
   const user = await requireAuth();
+  if (!user) return unauthorized();
   const body = await request.json().catch(() => null);
   if (!body?.name) {
     return NextResponse.json({ error: "Name is required" }, { status: 400 });

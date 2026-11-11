@@ -17,6 +17,7 @@ export function BusinessSettings() {
   const business = useStore((s) => s.business);
   const authUser = useStore((s) => s.authUser);
   const updateBusiness = useStore((s) => s.updateBusiness);
+  const saveBusiness = useStore((s) => s.saveBusiness);
   const fileRef = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -94,8 +95,7 @@ export function BusinessSettings() {
     setSaving(true);
     setSaved(false);
     try {
-      // Force a full save of business profile (already auto-saves, but this gives explicit confirmation)
-      await updateBusiness({ ...business });
+      await saveBusiness();
       setSaved(true);
       toast({ title: "Settings saved!", description: "Your business profile is updated." });
       setTimeout(() => setSaved(false), 2000);

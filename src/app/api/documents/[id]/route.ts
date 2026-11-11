@@ -4,11 +4,16 @@ import { db } from "@/lib/db";
 import { v4 as uuid } from "uuid";
 import { serializeDoc } from "@/lib/serialize";
 
+function unauthorized() {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
 type Params = { params: Promise<{ id: string }> };
 
 // GET /api/documents/[id] — fetch a single document with items
 export async function GET(_request: Request, { params }: Params) {
   const user = await requireAuth();
+  if (!user) return unauthorized();
   const { id } = await params;
   const doc = await db.invoiceDocument.findFirst({
     where: { id, userId: user.id },
@@ -23,13 +28,13 @@ export async function GET(_request: Request, { params }: Params) {
 // PUT /api/documents/[id] — update document fields + items
 export async function PUT(request: Request, { params }: Params) {
   const user = await requireAuth();
+  if (!user) return unauthorized();
   const { id } = await params;
   const body = await request.json().catch(() => null);
   if (!body) {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
 
-  // Verify ownership
   const existing = await db.invoiceDocument.findFirst({
     where: { id, userId: user.id },
     include: { items: true },
@@ -38,7 +43,6 @@ export async function PUT(request: Request, { params }: Params) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  // Update scalar fields
   const allowedFields = [
     "type", "number", "status", "issueDate", "dueDate",
     "taxRate", "globalDiscountPercent", "notes", "paymentTerms",
@@ -52,12 +56,18 @@ export async function PUT(request: Request, { params }: Params) {
     }
   }
 
-  // Handle status timestamps
+  // Handle status timestamps — clear when reverting
   if (body.status === "sent" && !existing.sentAt) {
     data.sentAt = new Date().toISOString();
+  } else if (body.status && body.status !== "sent" && body.status !== "paid" && body.status !== "viewed") {
+    // Clear sentAt when going back to draft/overdue
+    data.sentAt = null;
   }
   if (body.status === "paid") {
     data.paidAt = new Date().toISOString();
+  } else if (body.status && body.status !== "paid") {
+    // Clear paidAt when not paid
+    data.paidAt = null;
   }
 
   // Update client if changed
@@ -76,41 +86,38 @@ export async function PUT(request: Request, { params }: Params) {
     }
   }
 
-  // Handle items update if provided
+  // Handle items update — wrapped in transaction for safety
   if (Array.isArray(body.items)) {
-    // Replace all items — simplest correct approach
-    await db.lineItem.deleteMany({ where: { documentId: id } });
-    if (body.items.length > 0) {
-      await db.lineItem.createMany({
-        data: body.items.map((it: { description?: string; quantity?: number; unitPrice?: number; discountPercent?: number }) => ({
-          id: uuid(),
-          documentId: id,
-          description: it.description ?? "",
-          quantity: it.quantity ?? 1,
-          unitPrice: it.unitPrice ?? 0,
-          discountPercent: it.discountPercent ?? 0,
-        })),
-      });
-    } else {
-      // Ensure at least one empty item
-      await db.lineItem.create({
-        data: {
-          id: uuid(),
-          documentId: id,
-          description: "",
-          quantity: 1,
-          unitPrice: 0,
-          discountPercent: 0,
-        },
-      });
-    }
+    await db.$transaction(async (tx) => {
+      await tx.lineItem.deleteMany({ where: { documentId: id } });
+      if (body.items.length > 0) {
+        await tx.lineItem.createMany({
+          data: body.items.map((it: { id?: string; description?: string; quantity?: number; unitPrice?: number; discountPercent?: number }) => ({
+            id: it.id ?? uuid(),
+            documentId: id,
+            description: it.description ?? "",
+            quantity: it.quantity ?? 1,
+            unitPrice: it.unitPrice ?? 0,
+            discountPercent: it.discountPercent ?? 0,
+          })),
+        });
+      }
+      await tx.invoiceDocument.update({ where: { id }, data });
+    });
+  } else {
+    // No items update — just update the document
+    await db.invoiceDocument.update({ where: { id }, data });
   }
 
-  const updated = await db.invoiceDocument.update({
+  // Fetch the updated document with items to return
+  const updated = await db.invoiceDocument.findUnique({
     where: { id },
-    data,
     include: { items: true },
   });
+
+  if (!updated) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   return NextResponse.json(serializeDoc(updated));
 }
@@ -118,6 +125,7 @@ export async function PUT(request: Request, { params }: Params) {
 // DELETE /api/documents/[id] — delete a document
 export async function DELETE(_request: Request, { params }: Params) {
   const user = await requireAuth();
+  if (!user) return unauthorized();
   const { id } = await params;
 
   const existing = await db.invoiceDocument.findFirst({

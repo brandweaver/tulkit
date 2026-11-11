@@ -4,9 +4,20 @@ import { db } from "@/lib/db";
 import { FEATURE_KEYS } from "@/lib/types";
 import { daysRemaining } from "@/lib/features";
 
+function unauthorized() {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
+function forbidden() {
+  return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+}
+
 // GET /api/admin/users — list all users (admin only)
 export async function GET() {
-  await requireAdmin();
+  const user = await requireAdmin();
+  if (!user) return unauthorized();
+  // Double-check admin role for clear error
+  if (user.role !== "admin") return forbidden();
 
   const profiles = await db.businessProfile.findMany({
     orderBy: { createdAt: "desc" },

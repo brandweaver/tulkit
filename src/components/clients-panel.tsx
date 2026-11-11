@@ -136,10 +136,42 @@ export function ClientsPanel() {
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-destructive"
-                      onClick={() => {
-                        if (confirm(`Delete ${c.name}?`)) {
-                          deleteClient(c.id);
+                      onClick={async () => {
+                        if (!confirm(`Delete ${c.name}?`)) return;
+                        const success = await deleteClient(c.id);
+                        if (success) {
                           toast({ title: "Client deleted" });
+                        } else {
+                          // Check if it failed because of linked documents
+                          try {
+                            const res = await fetch(`/api/clients/${c.id}`);
+                            if (res.status === 409) {
+                              const data = await res.json();
+                              toast({
+                                title: "Cannot delete client",
+                                description: `${c.name} has ${data.docCount} linked document(s). Delete those first or use "force delete".`,
+                                variant: "destructive",
+                              });
+                              // Ask if they want to force delete
+                              if (confirm(`Force delete ${c.name} and ALL ${data.docCount} linked documents?`)) {
+                                const forceRes = await fetch(`/api/clients/${c.id}?force=true`, { method: "DELETE" });
+                                if (forceRes.ok) {
+                                  toast({ title: "Client and all linked documents deleted" });
+                                  // Remove from local state
+                                  useStore.setState((s) => ({
+                                    clients: s.clients.filter((cl) => cl.id !== c.id),
+                                    documents: s.documents.filter((d) => d.clientId !== c.id),
+                                  }));
+                                } else {
+                                  toast({ title: "Force delete failed", variant: "destructive" });
+                                }
+                              }
+                            } else {
+                              toast({ title: "Could not delete client", variant: "destructive" });
+                            }
+                          } catch {
+                            toast({ title: "Could not delete client", variant: "destructive" });
+                          }
                         }
                       }}
                     >
