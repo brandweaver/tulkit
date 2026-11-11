@@ -9,9 +9,19 @@ import type {
   Client,
   InvoiceDocument,
   LineItem,
+  FeatureKey,
 } from "./types";
+import { FEATURE_KEYS } from "./types";
 
-// Convert Prisma BusinessProfile to the front-end type
+// Convert a comma-separated string of features into a typed array
+function parseFeatures(raw: string | null): FeatureKey[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .filter((f) => FEATURE_KEYS.includes(f as FeatureKey))
+    .map((f) => f as FeatureKey);
+}
+
 export function serializeBusiness(b: PrismaBusiness): BusinessProfile {
   return {
     name: b.name,
@@ -33,6 +43,11 @@ export function serializeBusiness(b: PrismaBusiness): BusinessProfile {
     nextQuoteNumber: b.nextQuoteNumber,
     defaultTaxRate: b.defaultTaxRate,
     defaultPaymentTerms: b.defaultPaymentTerms,
+    role: b.role as "admin" | "user",
+    subscriptionStatus: b.subscriptionStatus as "none" | "active" | "expired",
+    subscriptionExpiresAt: b.subscriptionExpiresAt?.toISOString(),
+    subscriptionActivatedAt: b.subscriptionActivatedAt?.toISOString(),
+    allocatedFeatures: parseFeatures(b.allocatedFeatures),
   };
 }
 
@@ -48,8 +63,6 @@ export function serializeClient(c: PrismaClient): Client {
   };
 }
 
-// Convert a Prisma InvoiceDocument (with items) to the front-end type.
-// We reconstruct a `clientSnapshot` object from the flat client fields stored on the doc.
 export function serializeDoc(
   doc: PrismaDoc & { items: PrismaLineItem[] },
 ): InvoiceDocument {
@@ -75,6 +88,7 @@ export function serializeDoc(
     globalDiscountPercent: doc.globalDiscountPercent,
     notes: doc.notes ?? undefined,
     paymentTerms: doc.paymentTerms ?? undefined,
+    convertedFromId: doc.convertedFromId ?? undefined,
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
     sentAt: doc.sentAt?.toISOString(),

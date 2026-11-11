@@ -8,12 +8,17 @@ import type {
   LineItem,
   DocumentType,
   DocumentStatus,
+  FeatureKey,
 } from "./types";
-import { DEFAULT_BUSINESS, symbolForCurrency } from "./format";
+import { DEFAULT_BUSINESS, symbolForCurrency, addDaysISO, todayISO } from "./format";
 
 interface AuthUser {
   id: string;
   email: string;
+  role: string;
+  subscriptionStatus: string;
+  subscriptionExpiresAt?: string;
+  allocatedFeatures: FeatureKey[];
 }
 
 interface StoreState {
@@ -21,6 +26,7 @@ interface StoreState {
   authUser: AuthUser | null;
   authLoading: boolean;
   authError: string | null;
+  justSignedUp: boolean; // for showing "check email" message
 
   // Data
   business: BusinessProfile;
@@ -36,18 +42,19 @@ interface StoreState {
 
   // Data actions
   loadFromServer: () => Promise<void>;
-  resetData: () => void;
 
   // Business
   updateBusiness: (patch: Partial<BusinessProfile>) => Promise<void>;
 
   // Clients
-  upsertClient: (client: Client) => Promise<void>;
+  upsertClient: (client: Client) => Promise<Client | null>;
   deleteClient: (id: string) => Promise<void>;
 
   // Documents
   createDocument: (type: DocumentType, clientId?: string) => Promise<InvoiceDocument | null>;
+  convertQuoteToInvoice: (quoteId: string) => Promise<InvoiceDocument | null>;
   updateDocument: (id: string, patch: Partial<InvoiceDocument>) => Promise<void>;
+  saveDocument: (docId: string) => Promise<void>; // explicit save
   updateDocumentItem: (docId: string, itemId: string, patch: Partial<LineItem>) => void;
   addDocumentItem: (docId: string) => void;
   removeDocumentItem: (docId: string, itemId: string) => void;
@@ -71,6 +78,7 @@ export const useStore = create<StoreState>((set, get) => ({
   authUser: null,
   authLoading: true,
   authError: null,
+  justSignedUp: false,
 
   business: { ...DEFAULT_BUSINESS },
   clients: [],
@@ -82,8 +90,8 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       const data = await apiFetch("/api/auth/me");
       set({ authUser: data.user, authLoading: false });
-    } catch (e) {
-      set({ authUser: null, authLoading: false, authError: String(e) });
+    } catch {
+      set({ authUser: null, authLoading: false });
     }
   },
 
@@ -95,9 +103,9 @@ export const useStore = create<StoreState>((set, get) => ({
         body: JSON.stringify({ email, password }),
       });
       const me = await apiFetch("/api/auth/me");
-      set({ authUser: me.user, authLoading: false });
+      set({ authUser: me.user, authLoading: false, justSignedUp: false });
     } catch (e) {
-      set({ authLoading: false, authError: String(e) });
+      set({ authLoading: false });
       throw e;
     }
   },
@@ -105,19 +113,25 @@ export const useStore = create<StoreState>((set, get) => ({
   signUp: async (email, password) => {
     set({ authLoading: true, authError: null });
     try {
-      await apiFetch("/api/auth/signup", {
+      const result = await apiFetch("/api/auth/signup", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      // Auto-sign-in after signup
+      // If Supabase requires email confirmation, we won't auto-sign-in.
+      // Set justSignedUp = true to show "check email" message.
+      if (result.requiresEmailConfirmation) {
+        set({ authLoading: false, justSignedUp: true, authUser: null });
+        return;
+      }
+      // Auto sign-in after signup (when email confirmation is disabled)
       await apiFetch("/api/auth/signin", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
       const me = await apiFetch("/api/auth/me");
-      set({ authUser: me.user, authLoading: false });
+      set({ authUser: me.user, authLoading: false, justSignedUp: false });
     } catch (e) {
-      set({ authLoading: false, authError: String(e) });
+      set({ authLoading: false });
       throw e;
     }
   },
@@ -131,6 +145,7 @@ export const useStore = create<StoreState>((set, get) => ({
         business: { ...DEFAULT_BUSINESS },
         clients: [],
         documents: [],
+        justSignedUp: false,
       });
     }
   },
@@ -150,16 +165,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  resetData: () => {
-    set({
-      business: { ...DEFAULT_BUSINESS },
-      clients: [],
-      documents: [],
-    });
-  },
-
   updateBusiness: async (patch) => {
-    // Optimistic update
     const prev = get().business;
     const next: Partial<BusinessProfile> = { ...patch };
     if (patch.currency) {
@@ -183,7 +189,6 @@ export const useStore = create<StoreState>((set, get) => ({
   upsertClient: async (client) => {
     const exists = get().clients.some((c) => c.id === client.id);
     if (exists) {
-      // Optimistic update
       set((s) => ({
         clients: s.clients.map((c) => (c.id === client.id ? client : c)),
       }));
@@ -195,18 +200,19 @@ export const useStore = create<StoreState>((set, get) => ({
         set((s) => ({
           clients: s.clients.map((c) => (c.id === client.id ? updated : c)),
         }));
+        return updated;
       } catch (e) {
         console.error("Failed to update client:", e);
         throw e;
       }
     } else {
-      // Create new
       try {
         const created = await apiFetch("/api/clients", {
           method: "POST",
           body: JSON.stringify(client),
         });
         set((s) => ({ clients: [created, ...s.clients] }));
+        return created;
       } catch (e) {
         console.error("Failed to create client:", e);
         throw e;
@@ -240,8 +246,24 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  convertQuoteToInvoice: async (quoteId) => {
+    try {
+      const doc = await apiFetch(`/api/documents/${quoteId}/convert`, {
+        method: "POST",
+      });
+      set((s) => ({
+        documents: [doc, ...s.documents.map((d) =>
+          d.id === quoteId ? { ...d, status: "converted" as DocumentStatus } : d
+        )],
+      }));
+      return doc as InvoiceDocument;
+    } catch (e) {
+      console.error("Failed to convert quote:", e);
+      return null;
+    }
+  },
+
   updateDocument: async (id, patch) => {
-    // Optimistic update
     set((s) => ({
       documents: s.documents.map((d) =>
         d.id === id
@@ -251,7 +273,6 @@ export const useStore = create<StoreState>((set, get) => ({
     }));
 
     try {
-      // Get the current document state to send full items
       const doc = get().documents.find((d) => d.id === id);
       const body: Record<string, unknown> = { ...patch };
       if (doc) {
@@ -270,8 +291,33 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  // For line items, we update locally and debounced-sync via updateDocument.
-  // To keep things simple, we update locally and queue a sync.
+  saveDocument: async (docId) => {
+    const doc = get().documents.find((d) => d.id === docId);
+    if (!doc) return;
+    try {
+      const updated = await apiFetch(`/api/documents/${docId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          items: doc.items,
+          taxRate: doc.taxRate,
+          globalDiscountPercent: doc.globalDiscountPercent,
+          notes: doc.notes,
+          paymentTerms: doc.paymentTerms,
+          issueDate: doc.issueDate,
+          dueDate: doc.dueDate,
+          status: doc.status,
+        }),
+      });
+      set((s) => ({
+        documents: s.documents.map((d) => (d.id === docId ? updated : d)),
+      }));
+    } catch (e) {
+      console.error("Save failed:", e);
+      throw e;
+    }
+  },
+
+  // For line items — local update + debounced save
   updateDocumentItem: (docId, itemId, patch) => {
     set((s) => ({
       documents: s.documents.map((d) =>
@@ -286,7 +332,6 @@ export const useStore = create<StoreState>((set, get) => ({
           : d,
       ),
     }));
-    // Schedule a debounced save
     scheduleSave(docId, get);
   },
 
@@ -372,14 +417,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 }));
 
-// Debounced save helper — saves the document to the server after 800ms of no edits.
-// This prevents excessive API calls when typing in line items.
+// Debounced save — fires after 800ms of no edits to prevent excessive API calls
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function scheduleSave(
-  docId: string,
-  get: () => StoreState,
-) {
+function scheduleSave(docId: string, get: () => StoreState) {
   if (saveTimers.has(docId)) {
     clearTimeout(saveTimers.get(docId)!);
   }

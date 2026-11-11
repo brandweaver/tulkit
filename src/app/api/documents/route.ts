@@ -4,6 +4,8 @@ import { db } from "@/lib/db";
 import { v4 as uuid } from "uuid";
 import { todayISO, addDaysISO } from "@/lib/format";
 import { serializeDoc } from "@/lib/serialize";
+import { can } from "@/lib/features";
+import { FREE_TIER_LIMITS } from "@/lib/types";
 
 // GET /api/documents — list all documents for current user
 export async function GET() {
@@ -26,6 +28,26 @@ export async function POST(request: Request) {
 
   const type = body.type as "invoice" | "quote";
   const business = await ensureBusinessProfile(user.id);
+
+  // Check document limit for free users
+  const currentDocCount = await db.invoiceDocument.count({
+    where: { userId: user.id },
+  });
+  const userCanCreate = can(
+    { role: user.role, subscriptionStatus: user.subscriptionStatus, allocatedFeatures: user.allocatedFeatures as never },
+    "unlimited_documents",
+  );
+  if (!userCanCreate && currentDocCount >= FREE_TIER_LIMITS.maxDocuments) {
+    return NextResponse.json(
+      {
+        error: "Free tier limit reached",
+        code: "FREE_TIER_LIMIT",
+        limit: FREE_TIER_LIMITS.maxDocuments,
+        message: `Free users can create up to ${FREE_TIER_LIMITS.maxDocuments} documents. Upgrade to Pro for unlimited.`,
+      },
+      { status: 403 },
+    );
+  }
 
   // Resolve the client (must be owned by the user)
   let clientId: string | undefined = body.clientId;

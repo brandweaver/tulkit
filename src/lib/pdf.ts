@@ -2,10 +2,17 @@ import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { BusinessProfile, InvoiceDocument } from "./types";
 import { computeTotals, formatCurrency, formatDate } from "./format";
+import { can } from "./features";
 
 interface PdfOptions {
   business: BusinessProfile;
   doc: InvoiceDocument;
+  // Auth context for feature gating (watermark if no no_watermark feature)
+  user?: {
+    role: string;
+    subscriptionStatus: string;
+    allocatedFeatures: string[];
+  } | null;
 }
 
 // Convert hex "#RRGGBB" -> [r, g, b]
@@ -22,14 +29,27 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
+export function generateInvoicePdf({ business, doc, user }: PdfOptions): jsPDF {
   const pdf = new jsPDF({ unit: "pt", format: "a4" });
   const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
   const margin = 40;
-  const accent = hexToRgb(business.accentColor || "#059669");
+  const accent = hexToRgb(business.accentColor || "#0E7C9C");
   const totals = computeTotals(doc);
   const isInvoice = doc.type === "invoice";
   const title = isInvoice ? "INVOICE" : "QUOTE";
+
+  // Determine if we should show watermark (free users without no_watermark feature)
+  const showWatermark = !can(
+    user
+      ? {
+          role: user.role,
+          subscriptionStatus: user.subscriptionStatus,
+          allocatedFeatures: user.allocatedFeatures as never,
+        }
+      : null,
+    "no_watermark",
+  );
 
   // ----- Header band (accent colour) -----
   pdf.setFillColor(accent[0], accent[1], accent[2]);
@@ -37,18 +57,42 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
 
   // ----- Business block (top-left) -----
   let y = 50;
+  const logoMaxW = 100;
+  const logoMaxH = 50;
+  let logoH = 0;
+
   if (business.logoDataUrl) {
     try {
-      pdf.addImage(business.logoDataUrl, "PNG", margin, y, 90, 50);
+      // Detect format from data URL prefix
+      const isPng = business.logoDataUrl.startsWith("data:image/png");
+      const isJpeg =
+        business.logoDataUrl.startsWith("data:image/jpeg") ||
+        business.logoDataUrl.startsWith("data:image/jpg");
+      const format = isPng ? "PNG" : isJpeg ? "JPEG" : "PNG";
+
+      // Get image dimensions to preserve aspect ratio
+      const imgDims = pdf.getImageProperties(business.logoDataUrl);
+      const ratio = imgDims.width / imgDims.height;
+      // Fit within logoMaxW × logoMaxH while preserving aspect ratio
+      let drawW = logoMaxW;
+      let drawH = drawW / ratio;
+      if (drawH > logoMaxH) {
+        drawH = logoMaxH;
+        drawW = drawH * ratio;
+      }
+      pdf.addImage(business.logoDataUrl, format, margin, y, drawW, drawH);
+      logoH = drawH;
     } catch {
       // ignore bad image data
     }
   }
 
+  // Business name + details — positioned BELOW the logo (avoids overlap)
+  const textStartY = y + Math.max(logoH, 0) + 16;
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(16);
+  pdf.setFontSize(14);
   pdf.setTextColor(20, 20, 20);
-  pdf.text(business.name, margin, y + 70);
+  pdf.text(business.name, margin, textStartY);
 
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(9);
@@ -59,24 +103,34 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
     business.phone,
     business.vatNumber ? `VAT: ${business.vatNumber}` : "",
   ].filter(Boolean);
-  bizLines.forEach((line, i) => pdf.text(line, margin, y + 86 + i * 12));
+
+  // Use splitTextToSize to wrap long lines, with proper line spacing
+  const maxBizLineW = 220;
+  let bizY = textStartY + 14;
+  bizLines.forEach((line) => {
+    const wrapped = pdf.splitTextToSize(line, maxBizLineW);
+    wrapped.forEach((wLine: string) => {
+      pdf.text(wLine, margin, bizY);
+      bizY += 12;
+    });
+  });
 
   // ----- Title + number block (top-right) -----
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(28);
+  pdf.setFontSize(26);
   pdf.setTextColor(accent[0], accent[1], accent[2]);
-  pdf.text(title, pageW - margin, y + 10, { align: "right" });
+  pdf.text(title, pageW - margin, y + 4, { align: "right" });
 
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(11);
   pdf.setTextColor(60, 60, 60);
-  pdf.text(doc.number, pageW - margin, y + 28, { align: "right" });
+  pdf.text(doc.number, pageW - margin, y + 22, { align: "right" });
 
-  // Issue / Due dates
+  // Issue / Due dates — right column
   pdf.setFontSize(9);
   pdf.setTextColor(120, 120, 120);
   const dateX = pageW - margin;
-  let dateY = y + 48;
+  let dateY = y + 44;
   pdf.text("Issue Date", dateX, dateY, { align: "right" });
   pdf.setTextColor(30, 30, 30);
   pdf.setFont("helvetica", "bold");
@@ -89,17 +143,18 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
   pdf.setFont("helvetica", "bold");
   pdf.text(formatDate(doc.dueDate), dateX, dateY + 12, { align: "right" });
 
-  // ----- Bill To block -----
+  // ----- Bill To block — positioned below the business block -----
+  const billToY = Math.max(bizY + 16, dateY + 32);
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(10);
   pdf.setTextColor(120, 120, 120);
-  pdf.text(isInvoice ? "BILL TO" : "QUOTE FOR", margin, 200);
+  pdf.text(isInvoice ? "BILL TO" : "QUOTE FOR", margin, billToY);
 
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(12);
   pdf.setTextColor(20, 20, 20);
   const client = doc.clientSnapshot;
-  pdf.text(client.company || client.name, margin, 216);
+  pdf.text(client.company || client.name, margin, billToY + 16);
 
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(9);
@@ -111,13 +166,21 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
     client.phone,
     client.vatNumber ? `VAT: ${client.vatNumber}` : "",
   ].filter(Boolean);
-  clientLines.forEach((line, i) =>
-    pdf.text(line, margin, 232 + i * 12),
-  );
+
+  const maxClientLineW = 250;
+  let clientTextY = billToY + 32;
+  clientLines.forEach((line) => {
+    const wrapped = pdf.splitTextToSize(line, maxClientLineW);
+    wrapped.forEach((wLine: string) => {
+      pdf.text(wLine, margin, clientTextY);
+      clientTextY += 12;
+    });
+  });
 
   // ----- Items table -----
+  const tableStartY = clientTextY + 16;
   autoTable(pdf, {
-    startY: 232 + clientLines.length * 12 + 18,
+    startY: tableStartY,
     margin: { left: margin, right: margin },
     head: [["Description", "Qty", "Unit Price", "Disc.", "Amount"]],
     body: doc.items.map((it) => {
@@ -197,8 +260,20 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
   );
   afterTableY += 50;
 
-  // ----- Payment info (invoice only) -----
-  if (isInvoice && (business.bankName || business.bankAccount)) {
+  // ----- Payment info (invoice only + banking_details feature) -----
+  const showBanking = isInvoice && (business.bankName || business.bankAccount);
+  const canShowBanking = can(
+    user
+      ? {
+          role: user.role,
+          subscriptionStatus: user.subscriptionStatus,
+          allocatedFeatures: user.allocatedFeatures as never,
+        }
+      : null,
+    "banking_details",
+  );
+
+  if (showBanking && canShowBanking) {
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(10);
     pdf.setTextColor(120, 120, 120);
@@ -213,10 +288,11 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
       business.bankBranch ? `Branch: ${business.bankBranch}` : "",
       business.swift ? `SWIFT: ${business.swift}` : "",
     ].filter(Boolean);
-    bankLines.forEach((line, i) =>
-      pdf.text(line, margin, afterTableY + i * 12),
-    );
-    afterTableY += bankLines.length * 12 + 14;
+    bankLines.forEach((line) => {
+      pdf.text(line, margin, afterTableY);
+      afterTableY += 12;
+    });
+    afterTableY += 8;
   }
 
   // ----- Payment terms + notes -----
@@ -230,7 +306,7 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
     pdf.setTextColor(60, 60, 60);
     const wrapped = pdf.splitTextToSize(doc.paymentTerms, pageW - margin * 2);
     pdf.text(wrapped, margin, afterTableY);
-    afterTableY += wrapped.length * 12 + 14;
+    afterTableY += wrapped.length * 12 + 8;
   }
 
   if (doc.notes) {
@@ -245,8 +321,21 @@ export function generateInvoicePdf({ business, doc }: PdfOptions): jsPDF {
     pdf.text(wrappedNotes, margin, afterTableY);
   }
 
+  // ----- Watermark (free users) -----
+  if (showWatermark) {
+    pdf.saveGraphicsState();
+    pdf.setGState(new pdf.GState({ opacity: 0.12 }));
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(64);
+    pdf.setTextColor(150, 150, 150);
+    pdf.text("FREE PLAN", pageW / 2, pageH / 2, {
+      align: "center",
+      angle: 45,
+    });
+    pdf.restoreGraphicsState();
+  }
+
   // ----- Footer -----
-  const pageH = pdf.internal.pageSize.getHeight();
   pdf.setDrawColor(220, 220, 220);
   pdf.line(margin, pageH - 40, pageW - margin, pageH - 40);
   pdf.setFont("helvetica", "normal");
@@ -273,7 +362,6 @@ export function downloadInvoicePdf(opts: PdfOptions): void {
   pdf.save(filename);
 }
 
-// Returns the PDF as a base64 data URL (useful for sharing flows / preview iframes).
 export function invoicePdfDataUrl(opts: PdfOptions): string {
   const pdf = generateInvoicePdf(opts);
   return pdf.output("datauristring");

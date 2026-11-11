@@ -1,4 +1,4 @@
-// Prisma schema for Tulkit multi-user SaaS
+// Prisma schema for Tulkit multi-user SaaS with subscriptions
 // Uses Supabase Postgres for storage + Supabase Auth for users.
 // The `userId` fields store the Supabase auth.users.id (UUID string).
 
@@ -13,10 +13,12 @@ datasource db {
 }
 
 // Each user has one business profile (1:1 with Supabase auth user)
+// Also stores their role + subscription state.
 model BusinessProfile {
   id                String   @id @default(cuid())
   userId            String   @unique // Supabase auth user ID
 
+  // Business details
   name              String   @default("Your Business Name")
   email             String?
   phone             String?
@@ -36,6 +38,15 @@ model BusinessProfile {
   nextQuoteNumber   Int      @default(1)
   defaultTaxRate    Float    @default(15)
   defaultPaymentTerms String @default("Payment due within 7 days of issue date.")
+
+  // Role + subscription
+  role              String   @default("user") // "admin" | "user"
+  subscriptionStatus String  @default("none") // "none" | "active" | "expired"
+  subscriptionExpiresAt DateTime?
+  subscriptionActivatedAt DateTime?
+  // Comma-separated feature keys allocated to this user (when subscription active)
+  // e.g. "pdf_download,whatsapp_share,email_share,custom_branding"
+  allocatedFeatures String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -71,7 +82,7 @@ model InvoiceDocument {
 
   type        String   // "invoice" | "quote"
   number      String
-  status      String   // "draft" | "sent" | "viewed" | "paid" | "overdue"
+  status      String   // "draft" | "sent" | "viewed" | "paid" | "overdue" | "converted"
 
   // Snapshot of client at doc creation (so historical docs stay accurate)
   clientName      String
@@ -87,6 +98,9 @@ model InvoiceDocument {
   globalDiscountPercent Float @default(0)
   notes      String?
   paymentTerms String?
+
+  // For quote → invoice conversion tracking
+  convertedFromId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -36,6 +36,7 @@ export function ClientsPanel() {
   const deleteClient = useStore((s) => s.deleteClient);
   const [editing, setEditing] = useState<Client | null>(null);
   const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   function openNew() {
     setEditing({ ...EMPTY_CLIENT, id: uuid() });
@@ -47,16 +48,39 @@ export function ClientsPanel() {
     setOpen(true);
   }
 
-  function save() {
+  async function save() {
     if (!editing) return;
     if (!editing.name.trim()) {
       toast({ title: "Name is required", variant: "destructive" });
       return;
     }
-    upsertClient(editing);
-    setOpen(false);
-    setEditing(null);
-    toast({ title: "Client saved" });
+    setSaving(true);
+    try {
+      const saved = await upsertClient(editing);
+      setOpen(false);
+      setEditing(null);
+      toast({
+        title: "Client saved!",
+        description: saved ? `${saved.name} has been saved.` : undefined,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      if (msg.includes("Free tier limit")) {
+        toast({
+          title: "Free tier limit reached",
+          description: "Upgrade to Pro for unlimited clients.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Could not save client",
+          description: msg,
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -185,11 +209,15 @@ export function ClientsPanel() {
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>
+            <Button variant="outline" onClick={() => setOpen(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={save} className="bg-[#0E7C9C] hover:bg-[#0A6582] text-white">
-              Save client
+            <Button
+              onClick={save}
+              disabled={saving}
+              className="bg-[#0E7C9C] hover:bg-[#0A6582] text-white"
+            >
+              {saving ? "Saving..." : "Save client"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,31 +9,101 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CURRENCY_OPTIONS } from "@/lib/format";
 import { useStore } from "@/lib/store";
-import { Upload, Trash2 } from "lucide-react";
+import { Upload, Trash2, Save, Check, RefreshCw } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
+import { can } from "@/lib/features";
 
 export function BusinessSettings() {
   const business = useStore((s) => s.business);
+  const authUser = useStore((s) => s.authUser);
   const updateBusiness = useStore((s) => s.updateBusiness);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const userCtx = authUser
+    ? {
+        role: authUser.role,
+        subscriptionStatus: authUser.subscriptionStatus,
+        allocatedFeatures: authUser.allocatedFeatures,
+      }
+    : null;
+  const canCustomBranding = can(userCtx, "custom_branding");
 
   function handleLogoChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 800_000) {
+
+    // File size limit: 1MB
+    if (file.size > 1_000_000) {
       toast({
         title: "Logo too large",
-        description: "Please pick an image under 800 KB.",
+        description: "Please pick an image under 1 MB. Try compressing it at tinypng.com.",
         variant: "destructive",
       });
       return;
     }
+
+    // Validate it's an image
+    if (!file.type.startsWith("image/")) {
+      toast({
+        title: "Invalid file",
+        description: "Please upload an image file (PNG, JPG, or WebP).",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!canCustomBranding) {
+      toast({
+        title: "Pro feature",
+        description: "Custom branding requires a Pro subscription.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = () => {
+      // Get image dimensions to provide guidance
+      const img = new Image();
+      img.onload = () => {
+        const { width, height } = img;
+        if (width > 1000 || height > 1000) {
+          toast({
+            title: "Logo uploaded (large)",
+            description: `Image is ${width}×${height}. For best results, use a logo under 500×500 pixels.`,
+          });
+        } else {
+          toast({
+            title: "Logo uploaded",
+            description: `${width}×${height} — looks good!`,
+          });
+        }
+      };
+      img.src = String(reader.result);
       updateBusiness({ logoDataUrl: String(reader.result) });
-      toast({ title: "Logo updated" });
+    };
+    reader.onerror = () => {
+      toast({ title: "Could not read file", variant: "destructive" });
     };
     reader.readAsDataURL(file);
+  }
+
+  async function handleSaveAll() {
+    setSaving(true);
+    setSaved(false);
+    try {
+      // Force a full save of business profile (already auto-saves, but this gives explicit confirmation)
+      await updateBusiness({ ...business });
+      setSaved(true);
+      toast({ title: "Settings saved!", description: "Your business profile is updated." });
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      toast({ title: "Save failed", description: "Please try again.", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -85,12 +155,15 @@ export function BusinessSettings() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Branding</CardTitle>
-          <CardDescription>Logo and accent colour used on the PDF.</CardDescription>
+          <CardTitle>Branding {canCustomBranding ? "" : "(Pro feature)"}</CardTitle>
+          <CardDescription>
+            Logo and accent colour used on the PDF.
+            {!canCustomBranding && " Upgrade to Pro to upload your own logo and change branding."}
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center gap-4">
-            <div className="w-20 h-20 rounded-md border bg-muted/30 flex items-center justify-center overflow-hidden">
+            <div className="w-20 h-20 rounded-md border bg-muted/30 flex items-center justify-center overflow-hidden shrink-0">
               {business.logoDataUrl ? (
                 <img
                   src={business.logoDataUrl}
@@ -102,10 +175,16 @@ export function BusinessSettings() {
               )}
             </div>
             <div className="space-y-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => fileRef.current?.click()}
+                disabled={!canCustomBranding}
+              >
                 <Upload className="h-4 w-4 mr-2" /> Upload logo
               </Button>
-              {business.logoDataUrl && (
+              {business.logoDataUrl && canCustomBranding && (
                 <Button
                   type="button"
                   variant="ghost"
@@ -122,6 +201,9 @@ export function BusinessSettings() {
                 className="hidden"
                 onChange={handleLogoChange}
               />
+              <p className="text-xs text-muted-foreground">
+                PNG, JPG, or WebP. Max 1 MB. Recommended: square, under 500×500 px.
+              </p>
             </div>
           </div>
 
@@ -266,6 +348,24 @@ export function BusinessSettings() {
           </Field>
         </CardContent>
       </Card>
+
+      {/* Save button */}
+      <div className="sticky bottom-4 flex justify-end">
+        <Button
+          onClick={handleSaveAll}
+          disabled={saving}
+          size="lg"
+          className="bg-[#0E7C9C] hover:bg-[#0A6582] text-white shadow-lg"
+        >
+          {saving ? (
+            <><RefreshCw className="h-4 w-4 mr-2 animate-spin" /> Saving...</>
+          ) : saved ? (
+            <><Check className="h-4 w-4 mr-2" /> Saved!</>
+          ) : (
+            <><Save className="h-4 w-4 mr-2" /> Save all settings</>
+          )}
+        </Button>
+      </div>
     </div>
   );
 }
